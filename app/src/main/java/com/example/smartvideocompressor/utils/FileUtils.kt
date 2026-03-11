@@ -15,7 +15,7 @@ import java.util.Locale
 
 object FileUtils {
 
-    private const val AUTHORITY = "com.videocompressor.app.fileprovider"
+    private const val AUTHORITY = "com.example.smartvideocompressor.fileprovider"
 
     fun createOutputFile(context: Context): File {
         val outputDir = File(context.cacheDir, "compressed").also { it.mkdirs() }

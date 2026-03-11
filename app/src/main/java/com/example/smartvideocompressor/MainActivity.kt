@@ -10,7 +10,9 @@ import androidx.compose.material3.Surface
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.example.smartvideocompressor.ui.screens.CompressionScreen
 import com.example.smartvideocompressor.ui.screens.HomeScreen
+import com.example.smartvideocompressor.ui.screens.ResultScreen
 import com.example.smartvideocompressor.ui.theme.SmartVideoCompressorTheme
 import com.example.smartvideocompressor.viewmodel.VideoCompressorViewModel
 
@@ -35,9 +37,26 @@ class MainActivity : ComponentActivity() {
 fun VideoCompressorApp() {
     val viewModel: VideoCompressorViewModel = viewModel()
     val uiState by viewModel.uiState.collectAsState()
-    HomeScreen(
-        uiState = uiState,
-        viewModel = viewModel,
-        onStartCompression = { viewModel.startCompression() }
-    )
+    when {
+        uiState.compressionResult != null -> {
+            ResultScreen(
+                uiState = uiState,
+                onSave = { viewModel.saveCompressedVideo() },
+                onCompressAnother = { viewModel.resetToHome() }
+            )
+        }
+        uiState.isCompressing -> {
+            CompressionScreen(
+                uiState = uiState,
+                onCancel = { viewModel.cancelCompression() }
+            )
+        }
+        else -> {
+            HomeScreen(
+                uiState = uiState,
+                viewModel = viewModel,
+                onStartCompression = { viewModel.startCompression() }
+            )
+        }
+    }
 }
