@@ -7,10 +7,6 @@ import android.provider.OpenableColumns
 import com.example.smartvideocompressor.model.VideoInfo
 
 object VideoUtils {
-
-    /**
-     * Extract full video metadata from a URI.
-     */
     fun extractVideoInfo(context: Context, uri: Uri): VideoInfo? {
         return try {
             val retriever = MediaMetadataRetriever()
@@ -52,9 +48,6 @@ object VideoUtils {
         }
     }
 
-    /**
-     * Get file size from URI.
-     */
     fun getFileSize(context: Context, uri: Uri): Long {
         return try {
             context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
@@ -66,10 +59,6 @@ object VideoUtils {
             0L
         }
     }
-
-    /**
-     * Get display name from URI.
-     */
     fun getFileName(context: Context, uri: Uri): String {
         return try {
             context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
@@ -82,9 +71,6 @@ object VideoUtils {
         }
     }
 
-    /**
-     * Format bytes to human-readable string.
-     */
     fun formatFileSize(bytes: Long): String {
         return when {
             bytes >= 1_073_741_824L -> "%.2f GB".format(bytes / 1_073_741_824.0)
@@ -94,9 +80,6 @@ object VideoUtils {
         }
     }
 
-    /**
-     * Format bitrate to human-readable string.
-     */
     fun formatBitrate(bps: Long): String {
         return when {
             bps >= 1_000_000L -> "%.1f Mbps".format(bps / 1_000_000.0)
