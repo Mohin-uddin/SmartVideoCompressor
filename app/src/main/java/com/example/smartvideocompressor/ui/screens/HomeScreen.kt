@@ -37,21 +37,41 @@ import com.example.smartvideocompressor.utils.PermissionStatus
 import com.example.smartvideocompressor.utils.rememberVideoPermissionHandler
 import com.example.smartvideocompressor.viewmodel.VideoCompressorUiState
 import com.example.smartvideocompressor.viewmodel.VideoCompressorViewModel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HomeScreen(
     uiState: VideoCompressorUiState,
     viewModel: VideoCompressorViewModel,
-    onStartCompression: () -> Unit
+    onStartCompression: () -> Unit,
 ) {
+    val scope = rememberCoroutineScope()
+    var isPickerOpen by remember { mutableStateOf(false) }
+    var isInCooldown by remember { mutableStateOf(false) }
+
     val videoPicker = rememberLauncherForActivityResult(
         ActivityResultContracts.GetContent()
-    ) { uri: Uri? -> uri?.let { viewModel.onVideoSelected(it) } }
+    ) { uri: Uri? ->
+        isInCooldown = true
+        scope.launch {
+            delay(800)
+            isInCooldown = false
+            isPickerOpen = false
+        }
+        uri?.let { viewModel.onVideoSelected(it) }
+    }
 
-    // ✅ onGranted এ picker launch — permission confirm হলেই তবে picker খুলবে
+    fun launchPicker() {
+        if (!isPickerOpen && !isInCooldown) {
+            isPickerOpen = true
+            videoPicker.launch("video/*")
+        }
+    }
+
     val permissionHandler = rememberVideoPermissionHandler(
-        onGranted = { videoPicker.launch("video/*") }
+        onGranted = { launchPicker() }
     )
 
     Scaffold(
@@ -79,6 +99,7 @@ fun HomeScreen(
             VideoSelectorCard(
                 uiState = uiState,
                 permissionStatus = permissionHandler.status,
+                isClickEnabled = !uiState.isLoadingVideoInfo && !isInCooldown && !isPickerOpen,
                 onSelectVideo = { permissionHandler.requestOrProceed() },
                 onOpenSettings = permissionHandler.openSettings,
             )
@@ -88,7 +109,7 @@ fun HomeScreen(
                 enter = fadeIn() + expandVertically(),
                 exit = fadeOut() + shrinkVertically()
             ) {
-                uiState.selectedVideo?.let { video -> VideoInfoCard(videoInfo = video) }
+                uiState.selectedVideo?.let { VideoInfoCard(videoInfo = it) }
             }
 
             SectionHeader("2. Target Output Size")
@@ -96,14 +117,17 @@ fun HomeScreen(
             TargetSizeInput(
                 value = uiState.targetSizeMb,
                 onValueChange = { viewModel.onTargetSizeChanged(it) },
-                maxSizeMb = uiState.selectedVideo?.fileSizeMb
+                maxSizeMb = uiState.selectedVideo?.fileSizeMb,
+                minimumSizeMb = uiState.minimumTargetSizeMb,
+                isBelowMinimum = uiState.isBelowMinimum,
             )
 
             SectionHeader("3. Compression Quality")
 
             QualitySelector(
                 selected = uiState.selectedQuality,
-                onSelect = { viewModel.onQualityChanged(it) }
+                onSelect = { viewModel.onQualityChanged(it) },
+                allQualityParams = uiState.allQualityParams,
             )
 
             AnimatedVisibility(
@@ -111,7 +135,7 @@ fun HomeScreen(
                 enter = fadeIn() + expandVertically(),
                 exit = fadeOut() + shrinkVertically()
             ) {
-                uiState.estimatedParams?.let { params -> EstimatedOutputCard(params = params) }
+                uiState.estimatedParams?.let { EstimatedOutputCard(params = it) }
             }
 
             Button(
@@ -124,21 +148,27 @@ fun HomeScreen(
             ) {
                 Icon(Icons.Default.Compress, contentDescription = null)
                 Spacer(Modifier.width(8.dp))
-                Text("Start Compression", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                Text("Start Compression", style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold)
             }
 
             uiState.error?.let { error ->
                 Card(
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.errorContainer),
                     shape = RoundedCornerShape(12.dp)
                 ) {
-                    Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Default.Error, null, tint = MaterialTheme.colorScheme.onErrorContainer)
+                    Row(modifier = Modifier.padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.Error, null,
+                            tint = MaterialTheme.colorScheme.onErrorContainer)
                         Spacer(Modifier.width(8.dp))
                         Text(error, color = MaterialTheme.colorScheme.onErrorContainer,
-                            style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.weight(1f))
                         IconButton(onClick = { viewModel.dismissError() }) {
-                            Icon(Icons.Default.Close, "Dismiss", tint = MaterialTheme.colorScheme.onErrorContainer)
+                            Icon(Icons.Default.Close, "Dismiss",
+                                tint = MaterialTheme.colorScheme.onErrorContainer)
                         }
                     }
                 }
@@ -155,7 +185,7 @@ private fun HeaderBanner() {
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(20.dp))
-            .background(brush = Brush.horizontalGradient(colors = listOf(PrimaryDark, SecondaryDark)))
+            .background(Brush.horizontalGradient(colors = listOf(PrimaryDark, SecondaryDark)))
             .padding(20.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -163,9 +193,11 @@ private fun HeaderBanner() {
                 Text("Compress Your Videos", style = MaterialTheme.typography.titleLarge,
                     fontWeight = FontWeight.Bold, color = Color.White)
                 Text("Reduce file size while maintaining quality",
-                    style = MaterialTheme.typography.bodySmall, color = Color.White.copy(alpha = 0.8f))
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color.White.copy(alpha = 0.8f))
             }
-            Icon(Icons.Default.VideoFile, null, tint = Color.White.copy(alpha = 0.7f), modifier = Modifier.size(48.dp))
+            Icon(Icons.Default.VideoFile, null, tint = Color.White.copy(alpha = 0.7f),
+                modifier = Modifier.size(48.dp))
         }
     }
 }
@@ -174,11 +206,12 @@ private fun HeaderBanner() {
 private fun VideoSelectorCard(
     uiState: VideoCompressorUiState,
     permissionStatus: PermissionStatus,
+    isClickEnabled: Boolean,
     onSelectVideo: () -> Unit,
     onOpenSettings: () -> Unit,
 ) {
     Card(
-        modifier = Modifier.fillMaxWidth().clickable { onSelectVideo() },
+        modifier = Modifier.fillMaxWidth().clickable(enabled = isClickEnabled) { onSelectVideo() },
         shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
         border = CardDefaults.outlinedCardBorder()
@@ -192,22 +225,21 @@ private fun VideoSelectorCard(
                     Text("Reading video info...", style = MaterialTheme.typography.bodyMedium)
                 }
             }
-
             uiState.selectedVideo != null -> {
                 Row(modifier = Modifier.fillMaxWidth().padding(16.dp),
                     verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Default.CheckCircle, null, tint = Success, modifier = Modifier.size(24.dp))
+                    Icon(Icons.Default.CheckCircle, null, tint = Success,
+                        modifier = Modifier.size(24.dp))
                     Spacer(Modifier.width(12.dp))
                     Column(modifier = Modifier.weight(1f)) {
-                        Text(uiState.selectedVideo.name, style = MaterialTheme.typography.bodyMedium,
+                        Text(uiState.selectedVideo.name,
+                            style = MaterialTheme.typography.bodyMedium,
                             fontWeight = FontWeight.SemiBold, maxLines = 1)
                         Text("Tap to change video", style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
             }
-
-            // ✅ Permanently denied — Settings button দেখাও
             permissionStatus == PermissionStatus.PERMANENTLY_DENIED -> {
                 Column(modifier = Modifier.fillMaxWidth().padding(24.dp),
                     horizontalAlignment = Alignment.CenterHorizontally) {
@@ -219,7 +251,8 @@ private fun VideoSelectorCard(
                     Spacer(Modifier.height(4.dp))
                     Text("Video access was denied. Please enable it in app Settings.",
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center)
                     Spacer(Modifier.height(12.dp))
                     FilledTonalButton(onClick = onOpenSettings) {
                         Icon(Icons.Default.Settings, null, modifier = Modifier.size(16.dp))
@@ -228,17 +261,18 @@ private fun VideoSelectorCard(
                     }
                 }
             }
-
             else -> {
                 Column(modifier = Modifier.fillMaxWidth().padding(32.dp),
                     horizontalAlignment = Alignment.CenterHorizontally) {
-                    Icon(Icons.Outlined.VideoLibrary, null, tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(56.dp))
+                    Icon(Icons.Outlined.VideoLibrary, null,
+                        tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(56.dp))
                     Spacer(Modifier.height(12.dp))
                     Text("Tap to Select Video", style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.SemiBold)
-                    Text("Choose a video from your gallery", style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
+                    Text("Choose a video from your gallery",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center)
                 }
             }
         }
@@ -246,61 +280,140 @@ private fun VideoSelectorCard(
 }
 
 @Composable
-private fun TargetSizeInput(value: String, onValueChange: (String) -> Unit, maxSizeMb: Double?) {
-    OutlinedTextField(
-        value = value,
-        onValueChange = { input ->
-            if (input.isEmpty() || input.matches(Regex("^\\d*\\.?\\d*$"))) onValueChange(input)
-        },
-        label = { Text("Target Size (MB)") },
-        placeholder = { Text("e.g. 10") },
-        leadingIcon = { Icon(Icons.Default.DataUsage, contentDescription = null) },
-        trailingIcon = {
-            Text("MB", style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(end = 12.dp))
-        },
-        supportingText = { maxSizeMb?.let { Text("Original: %.1f MB → Set a smaller target".format(it)) } },
-        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-        singleLine = true,
-        shape = RoundedCornerShape(12.dp),
-        modifier = Modifier.fillMaxWidth()
-    )
+private fun TargetSizeInput(
+    value: String,
+    onValueChange: (String) -> Unit,
+    maxSizeMb: Double?,
+    minimumSizeMb: Double?,
+    isBelowMinimum: Boolean,
+) {
+    Column {
+        OutlinedTextField(
+            value = value,
+            onValueChange = { input ->
+                if (input.isEmpty() || input.matches(Regex("^\\d*\\.?\\d*$"))) onValueChange(input)
+            },
+            label = { Text("Target Size (MB)") },
+            placeholder = { Text("e.g. 10") },
+            leadingIcon = { Icon(Icons.Default.DataUsage, contentDescription = null) },
+            trailingIcon = {
+                Text("MB", style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(end = 12.dp))
+            },
+            supportingText = {
+                if (minimumSizeMb != null) {
+                    Text("Minimum: %.2f MB  •  Original: %.1f MB".format(
+                        minimumSizeMb, maxSizeMb ?: 0.0))
+                } else {
+                    maxSizeMb?.let { Text("Original: %.1f MB → Set a smaller target".format(it)) }
+                }
+            },
+            isError = isBelowMinimum,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+            singleLine = true,
+            shape = RoundedCornerShape(12.dp),
+            modifier = Modifier.fillMaxWidth()
+        )
+
+        AnimatedVisibility(visible = isBelowMinimum) {
+            Card(
+                modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                shape = RoundedCornerShape(10.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.7f))
+            ) {
+                Row(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.Warning, null, tint = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Target is below minimum %.2f MB. Output may have no video.".format(
+                        minimumSizeMb ?: 0.0),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onErrorContainer)
+                }
+            }
+        }
+    }
 }
 
 @Composable
-private fun QualitySelector(selected: CompressionQuality, onSelect: (CompressionQuality) -> Unit) {
-    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        CompressionQuality.entries.forEach { quality ->
-            val isSelected = quality == selected
-            Card(
-                modifier = Modifier.weight(1f).clickable { onSelect(quality) },
-                shape = RoundedCornerShape(12.dp),
-                colors = CardDefaults.cardColors(
-                    containerColor = if (isSelected) MaterialTheme.colorScheme.primaryContainer
-                    else MaterialTheme.colorScheme.surfaceVariant
-                ),
-                border = if (isSelected) CardDefaults.outlinedCardBorder() else null
-            ) {
-                Column(modifier = Modifier.padding(12.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                    Icon(
-                        imageVector = when (quality) {
-                            CompressionQuality.HIGH -> Icons.Default.HighQuality
-                            CompressionQuality.MEDIUM -> Icons.Default.Tune
-                            CompressionQuality.LOW -> Icons.Outlined.Compress
-                        },
-                        contentDescription = null,
-                        tint = if (isSelected) MaterialTheme.colorScheme.primary
-                        else MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(24.dp)
-                    )
-                    Spacer(Modifier.height(4.dp))
-                    Text(quality.label, style = MaterialTheme.typography.labelMedium,
-                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
-                        color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface)
-                    Text(quality.description, style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
+private fun QualitySelector(
+    selected: CompressionQuality,
+    onSelect: (CompressionQuality) -> Unit,
+    allQualityParams: Map<CompressionQuality, CompressionParams> = emptyMap(),
+) {
+    fun resFor(q: CompressionQuality): Pair<Int, Int>? {
+        val p = allQualityParams[q] ?: return null
+        return Pair(p.targetWidth, p.targetHeight)
+    }
+    val resMap = CompressionQuality.entries.associateWith { resFor(it) }
+
+    Column {
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            CompressionQuality.entries.forEach { quality ->
+                val isSelected = quality == selected
+                val res = resMap[quality]
+                val isUnique = res != null && resMap.entries
+                    .filter { it.key != quality }
+                    .none { it.value == res }
+
+                Card(
+                    modifier = Modifier.weight(1f).clickable { onSelect(quality) },
+                    shape = RoundedCornerShape(12.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = if (isSelected) MaterialTheme.colorScheme.primaryContainer
+                        else MaterialTheme.colorScheme.surfaceVariant),
+                    border = if (isSelected) CardDefaults.outlinedCardBorder() else null
+                ) {
+                    Column(modifier = Modifier.padding(10.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(
+                            imageVector = when (quality) {
+                                CompressionQuality.HIGH -> Icons.Default.HighQuality
+                                CompressionQuality.MEDIUM -> Icons.Default.Tune
+                                CompressionQuality.LOW -> Icons.Outlined.Compress
+                            },
+                            contentDescription = null,
+                            tint = if (isSelected) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(Modifier.height(4.dp))
+                        Text(quality.label, style = MaterialTheme.typography.labelMedium,
+                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                            color = if (isSelected) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.onSurface)
+                        if (isUnique && res != null) {
+                            Text("${res.first}x${res.second}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (isSelected)
+                                    MaterialTheme.colorScheme.primary.copy(alpha = 0.8f)
+                                else MaterialTheme.colorScheme.onSurfaceVariant,
+                                textAlign = TextAlign.Center)
+                        } else {
+                            Text(quality.description,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                textAlign = TextAlign.Center,
+                                maxLines = 2)
+                        }
+                    }
                 }
             }
+        }
+
+        val uniqueRes = resMap.values.filterNotNull().distinct()
+        if (uniqueRes.size == 1) {
+            Spacer(Modifier.height(6.dp))
+            Text(
+                "All presets output at ${uniqueRes[0].first}x${uniqueRes[0].second} for this video",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.fillMaxWidth(),
+                textAlign = TextAlign.Center
+            )
         }
     }
 }
@@ -310,11 +423,13 @@ private fun EstimatedOutputCard(params: CompressionParams) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.secondaryContainer)
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
             Text("⚡ Estimated Output", style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSecondaryContainer)
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSecondaryContainer)
             Spacer(Modifier.height(8.dp))
             StatRow("Estimated Size", "~%.1f MB".format(params.estimatedOutputSizeMb),
                 valueColor = MaterialTheme.colorScheme.onSecondaryContainer)

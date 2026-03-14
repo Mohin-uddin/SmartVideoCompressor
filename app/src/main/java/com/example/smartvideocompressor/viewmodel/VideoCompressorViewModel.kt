@@ -1,6 +1,7 @@
 package com.example.smartvideocompressor.viewmodel
 
 import android.app.Application
+import android.content.Intent
 import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -13,6 +14,7 @@ import com.example.smartvideocompressor.model.VideoInfo
 import com.example.smartvideocompressor.repository.VideoCompressorRepository
 import com.example.smartvideocompressor.utils.FileUtils
 import com.example.smartvideocompressor.worker.VideoCompressionWorker
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -25,13 +27,16 @@ data class VideoCompressorUiState(
     val targetSizeMb: String = "",
     val selectedQuality: CompressionQuality = CompressionQuality.MEDIUM,
     val estimatedParams: CompressionParams? = null,
+    val allQualityParams: Map<CompressionQuality, CompressionParams> = emptyMap(),
     val compressionProgress: Int = 0,
     val isCompressing: Boolean = false,
     val compressionResult: CompressionResult? = null,
     val isSaving: Boolean = false,
     val savedUri: Uri? = null,
     val error: String? = null,
-    val isLoadingVideoInfo: Boolean = false
+    val isLoadingVideoInfo: Boolean = false,
+    val minimumTargetSizeMb: Double? = null,
+    val isBelowMinimum: Boolean = false,
 )
 
 class VideoCompressorViewModel(application: Application) : AndroidViewModel(application) {
@@ -48,15 +53,28 @@ class VideoCompressorViewModel(application: Application) : AndroidViewModel(appl
     fun onVideoSelected(uri: Uri) {
         viewModelScope.launch {
             _uiState.update { it.copy(isLoadingVideoInfo = true, error = null) }
-            val videoInfo = repository.getVideoInfo(uri)
+            var videoInfo = repository.getVideoInfo(uri)
+
+            if (videoInfo == null) {
+                val retryDelays = listOf(300L, 600L)
+                for (delayMs in retryDelays) {
+                    if (videoInfo != null) break
+                    delay(delayMs)
+                    videoInfo = repository.getVideoInfo(uri)
+                }
+            }
+
             if (videoInfo != null) {
+                val minSizeMb = repository.getMinimumTargetSizeMb(videoInfo.durationSeconds)
                 _uiState.update {
                     it.copy(
                         selectedVideo = videoInfo,
                         isLoadingVideoInfo = false,
                         compressionResult = null,
                         savedUri = null,
-                        error = null
+                        error = null,
+                        minimumTargetSizeMb = minSizeMb,
+                        isBelowMinimum = false,
                     )
                 }
                 recalculateParams()
@@ -71,10 +89,12 @@ class VideoCompressorViewModel(application: Application) : AndroidViewModel(appl
         }
     }
 
+    // ── Target Size & Quality ─────────────────────────────────────────────────
 
     fun onTargetSizeChanged(value: String) {
         _uiState.update { it.copy(targetSizeMb = value) }
         recalculateParams()
+        revalidateMinimum(value)
     }
 
     fun onQualityChanged(quality: CompressionQuality) {
@@ -82,19 +102,24 @@ class VideoCompressorViewModel(application: Application) : AndroidViewModel(appl
         recalculateParams()
     }
 
+    private fun revalidateMinimum(targetValue: String) {
+        val minMb = _uiState.value.minimumTargetSizeMb ?: return
+        val targetMb = targetValue.toDoubleOrNull()
+        val isBelowMinimum = targetMb != null && targetMb < minMb
+        _uiState.update { it.copy(isBelowMinimum = isBelowMinimum) }
+    }
+
     private fun recalculateParams() {
         val state = _uiState.value
         val videoInfo = state.selectedVideo ?: return
         val targetMb = state.targetSizeMb.toDoubleOrNull() ?: return
         if (targetMb <= 0) return
-        val params = repository.calculateCompressionParams(
-            videoInfo = videoInfo,
-            targetSizeMb = targetMb,
-            quality = state.selectedQuality
-        )
-        _uiState.update { it.copy(estimatedParams = params) }
+        val allParams = CompressionQuality.entries.associateWith { q ->
+            repository.calculateCompressionParams(videoInfo, targetMb, q)
+        }
+        val selectedParams = allParams[state.selectedQuality]
+        _uiState.update { it.copy(estimatedParams = selectedParams, allQualityParams = allParams) }
     }
-
 
     fun startCompression() {
         val state = _uiState.value
@@ -111,7 +136,13 @@ class VideoCompressorViewModel(application: Application) : AndroidViewModel(appl
             return
         }
 
-        // ✅ WorkRequest build করো
+        runCatching {
+            getApplication<Application>().contentResolver.takePersistableUriPermission(
+                videoInfo.uri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION
+            )
+        }
+
         val request = VideoCompressionWorker.buildRequest(
             videoUri = videoInfo.uri,
             targetSizeMb = targetMb,
@@ -128,34 +159,22 @@ class VideoCompressorViewModel(application: Application) : AndroidViewModel(appl
             )
         }
 
-        // ✅ WorkManager এ enqueue
         workManager.enqueue(request)
 
-        // ✅ WorkInfo observe করো — progress + result দুটোই এখান থেকে
         viewModelScope.launch {
             workManager.getWorkInfoByIdFlow(request.id).collect { workInfo ->
                 if (workInfo == null) return@collect
 
                 when (workInfo.state) {
-                    // Worker চলছে — setProgressAsync দিয়ে পাঠানো % update করো
                     WorkInfo.State.RUNNING -> {
-                        val progress = workInfo.progress.getInt(
-                            VideoCompressionWorker.PROGRESS_KEY, 0
-                        )
+                        val progress = workInfo.progress.getInt(VideoCompressionWorker.PROGRESS_KEY, 0)
                         _uiState.update { it.copy(compressionProgress = progress) }
                     }
 
-                    // Worker শেষ — Result.success() এ যা পাঠানো হয়েছে
                     WorkInfo.State.SUCCEEDED -> {
-                        val outputUriString = workInfo.outputData.getString(
-                            VideoCompressionWorker.KEY_OUTPUT_URI
-                        )
-                        val originalSize = workInfo.outputData.getLong(
-                            VideoCompressionWorker.KEY_ORIGINAL_SIZE, 0L
-                        )
-                        val compressedSize = workInfo.outputData.getLong(
-                            VideoCompressionWorker.KEY_COMPRESSED_SIZE, 0L
-                        )
+                        val outputUriString = workInfo.outputData.getString(VideoCompressionWorker.KEY_OUTPUT_URI)
+                        val originalSize = workInfo.outputData.getLong(VideoCompressionWorker.KEY_ORIGINAL_SIZE, 0L)
+                        val compressedSize = workInfo.outputData.getLong(VideoCompressionWorker.KEY_COMPRESSED_SIZE, 0L)
 
                         if (outputUriString != null && compressedSize > 0) {
                             val result = CompressionResult(
@@ -165,11 +184,7 @@ class VideoCompressorViewModel(application: Application) : AndroidViewModel(appl
                                 compressedSizeBytes = compressedSize
                             )
                             _uiState.update {
-                                it.copy(
-                                    isCompressing = false,
-                                    compressionProgress = 100,
-                                    compressionResult = result
-                                )
+                                it.copy(isCompressing = false, compressionProgress = 100, compressionResult = result)
                             }
                         } else {
                             _uiState.update {
@@ -183,25 +198,18 @@ class VideoCompressorViewModel(application: Application) : AndroidViewModel(appl
                     }
 
                     WorkInfo.State.FAILED -> {
-                        val errorMsg = workInfo.outputData.getString(
-                            VideoCompressionWorker.KEY_ERROR
-                        ) ?: "Compression failed. Please try again or choose a higher target size."
+                        val errorMsg = workInfo.outputData.getString(VideoCompressionWorker.KEY_ERROR)
+                            ?: "Compression failed. Please try again or choose a higher target size."
                         _uiState.update {
-                            it.copy(
-                                isCompressing = false,
-                                compressionProgress = 0,
-                                error = errorMsg
-                            )
+                            it.copy(isCompressing = false, compressionProgress = 0, error = errorMsg)
                         }
                     }
 
                     WorkInfo.State.CANCELLED -> {
-                        _uiState.update {
-                            it.copy(isCompressing = false, compressionProgress = 0)
-                        }
+                        _uiState.update { it.copy(isCompressing = false, compressionProgress = 0) }
                     }
 
-                    else -> { /* ENQUEUED, BLOCKED — অপেক্ষা করো */ }
+                    else -> {}
                 }
             }
         }
@@ -210,9 +218,7 @@ class VideoCompressorViewModel(application: Application) : AndroidViewModel(appl
     fun cancelCompression() {
         currentWorkId?.let { workManager.cancelWorkById(it) }
         currentWorkId = null
-        _uiState.update {
-            it.copy(isCompressing = false, compressionProgress = 0)
-        }
+        _uiState.update { it.copy(isCompressing = false, compressionProgress = 0) }
     }
 
     fun saveCompressedVideo() {
@@ -224,10 +230,7 @@ class VideoCompressorViewModel(application: Application) : AndroidViewModel(appl
                 _uiState.update { it.copy(isSaving = false, savedUri = savedUri) }
             } else {
                 _uiState.update {
-                    it.copy(
-                        isSaving = false,
-                        error = "Failed to save video. Please check storage permissions."
-                    )
+                    it.copy(isSaving = false, error = "Failed to save video. Please check storage permissions.")
                 }
             }
         }

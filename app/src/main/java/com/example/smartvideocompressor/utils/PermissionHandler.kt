@@ -28,9 +28,28 @@ val videoReadPermission: String
     else
         Manifest.permission.READ_EXTERNAL_STORAGE
 
-fun Context.hasVideoPermission(): Boolean =
-    ContextCompat.checkSelfPermission(this, videoReadPermission) ==
-            PackageManager.PERMISSION_GRANTED
+fun Context.hasVideoPermission(): Boolean {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        val fullAccess = ContextCompat.checkSelfPermission(
+            this, Manifest.permission.READ_MEDIA_VIDEO
+        ) == PackageManager.PERMISSION_GRANTED
+
+        if (fullAccess) return true
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            val limitedAccess = ContextCompat.checkSelfPermission(
+                this, Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED
+            ) == PackageManager.PERMISSION_GRANTED
+            if (limitedAccess) return true
+        }
+        return false
+    }
+
+    // API < 33: READ_EXTERNAL_STORAGE
+    return ContextCompat.checkSelfPermission(
+        this, Manifest.permission.READ_EXTERNAL_STORAGE
+    ) == PackageManager.PERMISSION_GRANTED
+}
 
 fun Context.openAppSettings() {
     startActivity(
@@ -61,12 +80,24 @@ fun rememberVideoPermissionHandler(
         )
     }
     var hasBeenDeniedBefore by remember { mutableStateOf(false) }
+    val permissionsToRequest = buildList {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            add(Manifest.permission.READ_MEDIA_VIDEO)
+            add(Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED)
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            add(Manifest.permission.READ_MEDIA_VIDEO)
+        } else {
+            add(Manifest.permission.READ_EXTERNAL_STORAGE)
+        }
+    }
 
     val launcher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { isGranted ->
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { results ->
+
+        val granted = context.hasVideoPermission()
         when {
-            isGranted -> {
+            granted -> {
                 permissionStatus = PermissionStatus.GRANTED
                 onGranted()
             }
@@ -75,7 +106,6 @@ fun rememberVideoPermissionHandler(
             }
             else -> {
                 permissionStatus = PermissionStatus.DENIED
-                hasBeenDeniedBefore = true
             }
         }
     }
@@ -97,14 +127,13 @@ fun rememberVideoPermissionHandler(
         requestOrProceed = {
             when {
                 context.hasVideoPermission() -> {
-                    permissionStatus = PermissionStatus.GRANTED
                     onGranted()
                 }
                 resolvedStatus == PermissionStatus.PERMANENTLY_DENIED -> {
                     context.openAppSettings()
                 }
                 else -> {
-                    launcher.launch(videoReadPermission)
+                    launcher.launch(permissionsToRequest.toTypedArray())
                 }
             }
         },
